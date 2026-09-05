@@ -1,0 +1,38 @@
+.kw-player{position:relative;width:100%;background:#080d12;color:#fff;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+.kw-player:before{content:"";display:block;padding-top:56.25%}
+.kw-player video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;background:#080d12}
+.kw-player:not(.kw-started) video{object-fit:cover}
+.kw-player button{color:#fff;background:transparent;border:0;cursor:pointer;line-height:1;padding:10px;touch-action:manipulation}
+.kw-player button:focus,.kw-player select:focus,.kw-player input:focus{outline:2px solid #65c68d;outline-offset:2px}
+.kw-player button:disabled{opacity:.4;cursor:wait}
+.kw-player svg{width:26px;height:26px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}
+.kw-title{position:absolute;top:16px;left:24px;right:24px;display:flex;align-items:flex-start;pointer-events:none;text-shadow:0 1px 4px #000}
+.kw-title img{width:80px;height:120px;object-fit:cover;border-radius:5px;margin-right:12px}
+.kw-title strong,.kw-title span,.kw-title small{display:block;font-size:20px;line-height:1.25}
+.kw-title strong{font-size:24px}.kw-title small{font-size:18px}
+.kw-center{position:absolute;top:50%;left:0;right:0;display:flex;justify-content:center;align-items:center;transform:translateY(-50%)}
+.kw-center button{width:84px;height:84px;border-radius:50%;background:rgba(3,9,13,.86);margin:0 24px}
+.kw-center .kw-big-play{width:120px;height:120px}.kw-big-play svg{width:65px;height:65px}.kw-center>button:not(.kw-big-play) svg{width:36px;height:36px}
+.kw-bottom{position:absolute;bottom:16px;left:24px;right:24px}
+.kw-seek{display:block;width:100%;height:8px;-webkit-appearance:none;appearance:none;border-radius:6px;background:#53616a;margin:0 0 14px;cursor:pointer;touch-action:none}
+.kw-seek::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#20ce91}
+.kw-seek::-moz-range-thumb{width:18px;height:18px;border:0;border-radius:50%;background:#20ce91}
+.kw-toolbar{display:flex;align-items:center;padding:7px 16px;border-radius:40px;background:rgba(0,0,0,.9);min-height:58px}
+.kw-toolbar button{flex:0 0 auto;margin:0 3px}.kw-time{white-space:nowrap;font-size:14px;margin:0 10px}.kw-spacer{flex:1}
+.kw-playing .kw-center{opacity:0;pointer-events:none}.kw-hide-controls .kw-bottom,.kw-hide-controls .kw-title{opacity:0;pointer-events:none}
+.kw-panel{position:absolute;z-index:5;top:8px;right:8px;bottom:8px;width:400px;max-width:calc(100% - 16px);overflow-y:auto;-webkit-overflow-scrolling:touch;border-radius:12px;background:rgba(12,17,23,.98);padding:18px;box-sizing:border-box}
+.kw-panel h3{font-size:22px;margin:0 40px 18px 0;color:#fff}.kw-panel p{font-size:14px;line-height:1.5;color:#b8bec7}
+.kw-panel .kw-close{position:absolute;right:7px;top:4px;font-size:30px;min-width:44px;min-height:44px}
+.kw-setting{display:flex;align-items:center;justify-content:space-between;margin:14px 0;font-size:15px}
+.kw-setting>span{margin-right:12px}.kw-setting select{max-width:65%;min-height:40px;border-radius:5px;border:1px solid #434854;background:#252c35;color:#fff;font-size:16px;padding:7px}
+.kw-episode{display:flex;align-items:center;border-radius:7px;margin:5px 0;background:rgba(255,255,255,.04)}.kw-episode.kw-active{background:rgba(101,198,141,.18);box-shadow:inset 3px 0 #65c68d}
+.kw-episode>button:first-child{display:flex;align-items:center;text-align:left;flex:1;min-width:0;font-size:14px;line-height:1.35}
+.kw-episode img{width:76px;height:44px;object-fit:cover;border-radius:3px;margin-right:10px}.kw-episode small{display:block;color:#929ba5;margin-top:4px}
+.kw-player .kw-watched{flex:0 0 42px;font-size:24px;color:#65c68d}.kw-player .kw-season-watched{border:1px solid #65c68d;border-radius:5px;margin-bottom:10px;color:#65c68d}
+.kw-error{position:absolute;z-index:7;left:15%;right:15%;top:30%;border-radius:10px;padding:18px;background:rgba(10,14,21,.96);text-align:center;font-size:16px}
+.kw-error button{background:#65c68d;color:#102319;border-radius:4px;font-size:16px}.kw-error p{margin:0 0 14px}
+.kw-player [hidden]{display:none!important}.kw-player:fullscreen{width:100vw;height:100vh}.kw-player:fullscreen:before{display:none}
+@media(max-width:800px){.kw-title{top:12px;left:12px}.kw-title img{width:48px;height:72px}.kw-title strong{font-size:18px}.kw-title span,.kw-title small{font-size:14px}.kw-center button{width:54px;height:54px;margin:0 12px}.kw-center .kw-big-play{width:80px;height:80px}.kw-big-play svg{width:48px;height:48px}.kw-center>button:not(.kw-big-play) svg{width:28px;height:28px}.kw-bottom{left:12px;right:12px;bottom:10px}.kw-toolbar{padding:3px 8px;min-height:44px}.kw-toolbar button{padding:7px;margin:0}.kw-toolbar svg{width:23px;height:23px}.kw-time{font-size:12px;margin:0 6px}.kw-seek{margin-bottom:10px;height:6px}.kw-panel{padding:12px}.kw-panel h3{font-size:18px;margin-bottom:8px}.kw-setting{margin:8px 0}.kw-title,.kw-bottom{transition:opacity .2s}}
+@media(max-width:480px){.kw-title img{display:none}.kw-title span,.kw-title small{display:none}.kw-title strong{font-size:16px}.kw-toolbar [data-action="volume"],.kw-toolbar [data-action="pip"]{display:none}.kw-center{top:45%}.kw-center .kw-big-play{height:56px;width:56px}.kw-big-play svg{width:36px;height:36px}.kw-center button{width:40px;height:40px;margin:0 8px}.kw-toolbar svg{width:20px;height:20px}.kw-toolbar{min-height:36px}.kw-time{font-size:11px}.kw-bottom{bottom:7px;left:8px;right:8px}.kw-error{top:8%;left:5%;right:5%;font-size:14px;padding:12px}}
+/* Flex gap and aspect-ratio are unavailable on iOS 12. */
+@supports not (aspect-ratio:16/9){.iv-seasons .iv-season-tabs>*{margin-right:6px}.iv-seasons .iv-episode-card{margin:0 8px 8px 0}}

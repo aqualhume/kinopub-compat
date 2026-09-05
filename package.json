@@ -1,0 +1,16 @@
+{
+  "name": "kino-watch-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Kinopub client with live account integration and an iOS 12 player",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check server.mjs && node --check public/compat-player.js && node --check public/compat.js"
+  },
+  "dependencies": { "esbuild": "0.25.10", "hls.js": "1.6.13" },
+  "devDependencies": { "acorn": "8.15.0", "playwright": "1.55.1" }
+}
