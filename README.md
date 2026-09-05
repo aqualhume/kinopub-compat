@@ -201,8 +201,10 @@ Pages are adapted in memory, so the work the server adds is measured in
 milliseconds; transfer size is what usually decides how quickly an old iPad
 finishes loading. Several behaviours keep that small:
 
-- Pages, scripts, stylesheets, and playlists are sent compressed (Brotli or
-  gzip) when the browser accepts it, which is roughly a 3–10x reduction.
+- Pages, scripts, stylesheets, and playlists are sent compressed when the browser
+  accepts it, which is roughly a 3–10x reduction. Safari offers only gzip over
+  plain HTTP, so that is the path an iPad takes here; Brotli is used when a
+  browser advertises it.
 - The service is asked for compressed bytes too, so the upstream fetch is
   smaller as well. Bodies are expanded locally only to be rewritten.
 - The local player files, including `hls.js`, are read from disk once, kept

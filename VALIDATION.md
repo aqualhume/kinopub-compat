@@ -20,7 +20,7 @@ Verified on 2026-09-05 against the signed-in live service with Playwright.
 | Account progress readback | Test title returned zero immediately after saves on both local client and original website | Upstream behavior unresolved; browser-local resume fallback added |
 | Local resume | Sought to 67 seconds, reloaded, started playback, confirmed resume at 67 seconds; cleared test position afterward | Pass |
 | Older browser syntax | Local browser scripts parse as ES5; upstream legacy scripts transformed to Safari 12 target | Pass for checked syntax |
-| Transfer size and caching | Against a mock upstream, a legacy page fell from 671KB to 180KB on the wire and a 2000-segment manifest from 32.9ms to 7.6ms; through a throttled link, scripts and `hls.js` arrived 3.6–4.4x faster at 3–25 Mbit; local player files answered `304` on reload | Pass under measurement, not on device |
+| Transfer size and caching | Against a mock upstream, a legacy page fell from 669KB to 193KB on the wire for a client sending `gzip, deflate`, which is what Safari offers over plain HTTP, and to 180KB for a client that also accepts Brotli; a 2000-segment manifest fell from 32.9ms to 7.6ms; local player files answered `304` on reload. Through a throttled link, scripts and `hls.js` arrived 3.6–4.4x faster at 3–25 Mbit | Pass under measurement, not on device |
 | Regression checks | 16 automated checks, including CSRF cookie separation, unchanged account request bodies, cross-origin write rejection, video byte ranges, compressed documents, asset revalidation, and untouched relayed media | Pass |
 | iPad responsive layout | 768×1024 WebKit viewport, touch/mobile settings; no horizontal overflow | Pass in emulation |
 | Actual iOS 12 hardware | Awaiting user playback test | Pending |
@@ -37,7 +37,11 @@ those ratios suggest. On realistic page markup, compressing repaid its own cost
 at every size measured, from a 0.7KB fragment upward; the cost itself is about
 0.03ms on a small document and 0.26ms on 24KB of script. Sub-millisecond
 comparisons on small documents sit within measurement noise and should not be
-read as a difference. No timing has been taken on iOS 12 hardware.
+read as a difference. The throttled figures were taken with a client accepting
+Brotli; Safari over plain HTTP receives gzip instead, which is about 8% larger on
+`hls.js` and roughly twice the size on a small HTML document, so a device sees
+slightly less benefit than those ratios show. No timing has been taken on iOS 12
+hardware.
 
 Reference screenshots and temporary browser artifacts are ignored by Git.
 Authenticated browser state is never persisted by the test harness.

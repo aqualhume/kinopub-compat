@@ -47,8 +47,9 @@ async function localAsset(pathname) {
   return asset;
 }
 
-// Picks an encoding the client advertised. Brotli first: it is meaningfully
-// smaller on scripts, and iOS 12 Safari supports it over plain HTTP.
+// Picks an encoding the client advertised. Brotli is preferred when offered
+// because it is smaller, but Safari sends only "gzip, deflate" over plain HTTP,
+// so the gzip branch is the one an iPad on this server actually takes.
 function negotiate(accept = '', asset) {
   if (!asset.gzip) return null;
   if (/\bbr\b/.test(accept)) return { encoding: 'br', body: asset.br };
