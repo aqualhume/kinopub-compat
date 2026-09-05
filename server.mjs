@@ -10,8 +10,10 @@ import { transform } from 'esbuild';
 import { UPSTREAM, isLegacy, localize, rewriteCookie, rewriteHTML, rewriteManifest, resolveMedia } from './lib/transform.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
-// Old iPads open many parallel connections; a wider pool avoids head-of-line
-// stalls while requests for a single page fan out to the service.
+// Reusing warm TLS connections is what saves time here; a handshake costs far
+// more than the pool bookkeeping. The socket ceiling only matters past about 60
+// simultaneous upstream requests, which needs several devices streaming at once,
+// so it is raised as headroom rather than as a measured page-load win.
 const transport = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 128, maxFreeSockets: 32, scheduling: 'lifo' });
 const hopHeaders = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade']);
 const javascriptCache = new Map();
