@@ -234,8 +234,12 @@ npm run check
 
 Tests cover device detection, cookie rewriting, local links, relay signature
 validation, HLS variants/audio/subtitles/keys/segments, and ES5 syntax for locally
-authored browser scripts. See [VALIDATION.md](VALIDATION.md) for live browser
-checks and remaining device verification.
+authored browser scripts. They also cover the transfer behaviour: documents
+survive the compression round-trip unchanged, local player files revalidate with
+a `304`, compiled scripts keep a validator distinct from the original bytes, and
+relayed media and partial responses are passed through untouched. See
+[VALIDATION.md](VALIDATION.md) for live browser checks and remaining device
+verification.
 
 `scripts/verify-webkit.mjs` is a one-shot verification harness, separate from the
 app. It receives a test session through a loopback-only JSON request, keeps cookies
