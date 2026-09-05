@@ -1,4 +1,5 @@
 import http from 'node:http';
+import http2 from 'node:http2';
 import https from 'node:https';
 import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
@@ -10,11 +11,10 @@ import { transform } from 'esbuild';
 import { UPSTREAM, isLegacy, localize, rewriteCookie, rewriteHTML, rewriteManifest, resolveMedia } from './lib/transform.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
-// Reusing warm TLS connections is what saves time here; a handshake costs far
-// more than the pool bookkeeping. The socket ceiling only matters past about 60
-// simultaneous upstream requests, which needs several devices streaming at once,
-// so it is raised as headroom rather than as a measured page-load win.
+// Non-kino.watch HTTPS traffic, principally relayed CDN media, retains warm TLS
+// sockets. kino.watch itself uses the multiplexed HTTP/2 session below.
 const transport = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 128, maxFreeSockets: 32, scheduling: 'lifo' });
+const h2Sessions = new Map();
 const hopHeaders = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade']);
 const javascriptCache = new Map();
 const serviceCookieNames = new Set(['PHPSESSID', '_identity', '_csrf', 'token']);
@@ -31,13 +31,57 @@ const assetCache = new Map();
 // over in saved bytes, so the floor only skips bodies too short to benefit from
 // a smaller packet at all.
 const MIN_COMPRESS = 1024;
+const PUBLIC_ASSET_TTL = 5 * 60 * 1000;
+const PUBLIC_ASSET_CACHE_BYTES = 32 * 1024 * 1024;
+const PUBLIC_ASSET_ENTRY_BYTES = 4 * 1024 * 1024;
+
+// kino.watch supports HTTP/2. One multiplexed TLS session avoids opening a
+// fresh upstream socket for each of the browser's concurrent asset requests.
+function upstreamHTTP2Request(target, options, callback) {
+  let session = h2Sessions.get(target.origin);
+  if (!session || session.closed || session.destroyed) {
+    session = http2.connect(target.origin);
+    h2Sessions.set(target.origin, session);
+    session.on('close', () => { if (h2Sessions.get(target.origin) === session) h2Sessions.delete(target.origin); });
+    session.on('goaway', () => { if (h2Sessions.get(target.origin) === session) h2Sessions.delete(target.origin); });
+    session.on('error', () => {});
+  }
+  const headers = {
+    ':method': options.method,
+    ':scheme': target.protocol.slice(0, -1),
+    ':authority': target.host,
+    ':path': target.pathname + target.search
+  };
+  for (const [key, value] of Object.entries(options.headers || {})) {
+    if (key !== 'host' && !key.startsWith(':')) headers[key] = value;
+  }
+  const stream = session.request(headers);
+  stream.once('response', incoming => {
+    const responseHeaders = {};
+    for (const [key, value] of Object.entries(incoming)) if (!key.startsWith(':')) responseHeaders[key] = value;
+    stream.headers = responseHeaders;
+    stream.statusCode = Number(incoming[':status']);
+    stream.httpVersion = '2.0';
+    callback(stream);
+  });
+  return stream;
+}
+
+function defaultUpstreamRequest(target, options, callback) {
+  return target.origin === UPSTREAM ? upstreamHTTP2Request(target, options, callback) : https.request(target, options, callback);
+}
+
+function isPublicAsset(pathname) {
+  return /^\/(?:assets|css|libs|images)\//.test(pathname);
+}
 
 async function localAsset(pathname) {
   let asset = assetCache.get(pathname);
   if (asset) return asset;
   const [path, type] = files[pathname];
   const bytes = await readFile(root + path);
-  asset = { type, bytes, etag: '"' + createHash('sha1').update(bytes).digest('base64url') + '"' };
+  const version = createHash('sha1').update(bytes).digest('base64url');
+  asset = { type, bytes, version, etag: '"' + version + '"' };
   if (bytes.length >= MIN_COMPRESS) {
     asset.gzip = zlib.gzipSync(bytes, { level: 6 });
     asset.br = zlib.brotliCompressSync(bytes, { params: {
@@ -48,6 +92,11 @@ async function localAsset(pathname) {
   assetCache.set(pathname, asset);
   return asset;
 }
+
+const localAssetVersionsReady = Promise.all(Object.keys(files).map(async pathname => {
+  const asset = await localAsset(pathname);
+  return [pathname, asset.version];
+})).then(Object.fromEntries);
 
 // Picks an encoding the client advertised. Brotli is preferred when offered
 // because it is smaller, but Safari sends only "gzip, deflate" over plain HTTP,
@@ -82,7 +131,62 @@ function decompress(buffer, encoding = '') {
   }
 }
 
-export function createServer({ upstreamRequest = https.request } = {}) {
+export function createServer({ upstreamRequest = defaultUpstreamRequest } = {}) {
+  const publicAssets = new Map();
+  let publicAssetBytes = 0;
+
+  function cachedPublicAsset(key) {
+    const entry = publicAssets.get(key);
+    if (!entry) return null;
+    if (entry.expires <= Date.now()) {
+      publicAssets.delete(key); publicAssetBytes -= entry.size; return null;
+    }
+    publicAssets.delete(key); publicAssets.set(key, entry);
+    return entry;
+  }
+
+  function storePublicAsset(key, entry) {
+    if (entry.size > PUBLIC_ASSET_ENTRY_BYTES) return;
+    const previous = publicAssets.get(key);
+    if (previous) publicAssetBytes -= previous.size;
+    publicAssets.delete(key); publicAssets.set(key, entry); publicAssetBytes += entry.size;
+    while (publicAssetBytes > PUBLIC_ASSET_CACHE_BYTES && publicAssets.size > 1) {
+      const oldest = publicAssets.keys().next().value;
+      const removed = publicAssets.get(oldest);
+      publicAssets.delete(oldest); publicAssetBytes -= removed.size;
+    }
+  }
+
+  function servePublicAsset(req, res, entry) {
+    const requestTag = req.headers['if-none-match'];
+    if (requestTag && entry.headers.etag && String(requestTag).split(/\s*,\s*/).includes(String(entry.headers.etag))) {
+      res.writeHead(304, {
+        etag: entry.headers.etag,
+        vary: entry.headers.vary,
+        'cache-control': entry.headers['cache-control']
+      });
+      res.end(); return;
+    }
+    const accept = req.headers['accept-encoding'] || '';
+    const encoding = entry.body.length < MIN_COMPRESS ? null : (/\bbr\b/.test(accept) ? 'br' : (/\bgzip\b/.test(accept) ? 'gzip' : (/\bdeflate\b/.test(accept) ? 'deflate' : null)));
+    let selected = encoding && entry.encoded[encoding] ? { encoding, body: entry.encoded[encoding] } : compressBody(accept, entry.body);
+    if (selected && !entry.encoded[selected.encoding]) {
+      entry.encoded[selected.encoding] = selected.body;
+      entry.size += selected.body.length;
+      publicAssetBytes += selected.body.length;
+      while (publicAssetBytes > PUBLIC_ASSET_CACHE_BYTES && publicAssets.size > 1) {
+        const oldest = publicAssets.keys().next().value;
+        const removed = publicAssets.get(oldest);
+        publicAssets.delete(oldest); publicAssetBytes -= removed.size;
+      }
+    }
+    const body = selected ? selected.body : entry.body;
+    const headers = { ...entry.headers, age: String(Math.max(0, Math.floor((Date.now() - entry.stored) / 1000))), 'content-length': String(body.length) };
+    if (selected) headers['content-encoding'] = selected.encoding;
+    res.writeHead(200, headers);
+    res.end(req.method === 'HEAD' ? undefined : body);
+  }
+
   return http.createServer(async (req, res) => {
     try {
       const local = new URL(req.url, 'http://local.invalid');
@@ -92,14 +196,17 @@ export function createServer({ upstreamRequest = https.request } = {}) {
       }
       if (files[local.pathname]) {
         const asset = await localAsset(local.pathname);
-        // A revalidated asset costs one small 304 instead of resending hls.js.
+        const immutable = local.searchParams.get('v') === asset.version;
+        const cacheControl = immutable ? 'public, max-age=31536000, immutable' : 'no-cache';
+        // Unversioned URLs can still revalidate; injected pages use the content
+        // version and remain in the browser cache without another request.
         if (req.headers['if-none-match'] === asset.etag) {
-          res.writeHead(304, { etag: asset.etag, 'cache-control': 'no-cache' });
+          res.writeHead(304, { etag: asset.etag, 'cache-control': cacheControl });
           return res.end();
         }
         const headers = {
           'content-type': asset.type,
-          'cache-control': 'no-cache',
+          'cache-control': cacheControl,
           etag: asset.etag,
           vary: 'Accept-Encoding',
           'x-content-type-options': 'nosniff'
@@ -126,6 +233,12 @@ export function createServer({ upstreamRequest = https.request } = {}) {
       if (!relay) target.searchParams.delete('__quality');
       const legacy = compatQuery === '1' || (compatQuery !== '0' && (/\bkw_compat=1\b/.test(req.headers.cookie || '') || isLegacy(req.headers['user-agent'])));
       if (compatQuery !== null) res.setHeader('set-cookie', `kw_compat=${compatQuery === '1' ? '1' : '0'}; Path=/; SameSite=Lax`);
+      const publicAsset = !relay && ['GET','HEAD'].includes(req.method) && !req.headers.range && isPublicAsset(target.pathname);
+      const publicAssetKey = publicAsset ? `${legacy ? 'legacy' : 'modern'}:${target.href}` : null;
+      if (publicAsset && !/\b(?:no-cache|max-age=0)\b/i.test(req.headers['cache-control'] || '')) {
+        const cached = cachedPublicAsset(publicAssetKey);
+        if (cached) { servePublicAsset(req, res, cached); return; }
+      }
 
       const headers = {};
       for (const [key, value] of Object.entries(req.headers)) {
@@ -141,7 +254,7 @@ export function createServer({ upstreamRequest = https.request } = {}) {
       // 304 for a body this proxy had compiled.
       if (headers['if-none-match']) headers['if-none-match'] = String(headers['if-none-match']).replace(/"c12~/g, '"');
       if (target.origin === UPSTREAM) {
-        if (req.headers.cookie) headers.cookie = req.headers.cookie.split(';').filter(c => {
+        if (req.headers.cookie && !publicAsset) headers.cookie = req.headers.cookie.split(';').filter(c => {
           const name = c.trim().split('=')[0];
           return serviceCookieNames.has(name) || name.endsWith('-filter');
         }).join(';');
@@ -172,6 +285,7 @@ export function createServer({ upstreamRequest = https.request } = {}) {
             // validators stay usable and repeat visits can answer with a 304
             // instead of resending and recompiling the whole file.
             const keepValidators = textual && (script || style) && !manifest;
+            const cachePublicResponse = publicAsset && response.statusCode === 200 && keepValidators && !response.headers['set-cookie'] && !/\b(?:private|no-store)\b/i.test(response.headers['cache-control'] || '');
             for (const [key, value] of Object.entries(response.headers)) {
               if (hopHeaders.has(key) || ['set-cookie','content-length','content-encoding','strict-transport-security','content-security-policy','content-security-policy-report-only','access-control-allow-origin'].includes(key)) continue;
               if (textual && key === 'content-md5') continue;
@@ -193,6 +307,7 @@ export function createServer({ upstreamRequest = https.request } = {}) {
             // forcing a full re-download of the site's assets on every page.
             if (keepValidators) res.setHeader('vary', 'User-Agent, Accept-Encoding');
             else if (textual) res.setHeader('vary', 'User-Agent, Cookie, Accept-Encoding');
+            if (cachePublicResponse) res.setHeader('cache-control', 'public, max-age=300');
             // A compiled body differs from the upstream bytes, so its validator
             // is marked to prevent a cache from mixing the two variants when the
             // compatibility mode is toggled in the same browser.
@@ -219,7 +334,10 @@ export function createServer({ upstreamRequest = https.request } = {}) {
               let body = decompress(Buffer.concat(chunks), response.headers['content-encoding']).toString('utf8');
               if (manifest) body = rewriteManifest(body, target.href, legacy, quality);
               else if (html) {
-                body = rewriteHTML(body, legacy);
+                body = rewriteHTML(body, legacy, {
+                  nativeHLS: isLegacy(req.headers['user-agent']),
+                  assetVersions: legacy ? await localAssetVersionsReady : null
+                });
                 if (legacy) body = await compileInline(body);
               } else {
                 body = localize(body);
@@ -234,6 +352,19 @@ export function createServer({ upstreamRequest = https.request } = {}) {
               if (encoded) res.setHeader('content-encoding', encoded.encoding);
               const out = encoded ? encoded.body : buffer;
               res.setHeader('content-length', String(out.length));
+              if (cachePublicResponse) {
+                const cachedHeaders = { ...res.getHeaders() };
+                delete cachedHeaders['content-length']; delete cachedHeaders['content-encoding'];
+                delete cachedHeaders['set-cookie']; delete cachedHeaders.date;
+                storePublicAsset(publicAssetKey, {
+                  body: buffer,
+                  encoded: encoded ? { [encoded.encoding]: out } : {},
+                  headers: cachedHeaders,
+                  stored: Date.now(),
+                  expires: Date.now() + PUBLIC_ASSET_TTL,
+                  size: buffer.length + (encoded ? out.length : 0)
+                });
+              }
               res.end(out);
             }
           } catch (error) { fail(res, error); }
@@ -310,5 +441,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     } else if (host !== '127.0.0.1') console.log(`Listening: http://${host}:${port}`);
   });
   server.on('error', error => { console.error(error.message); process.exitCode = 1; });
-  for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => { server.close(); transport.destroy(); });
+  for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => {
+    server.close(); transport.destroy();
+    for (const session of h2Sessions.values()) session.destroy();
+    h2Sessions.clear();
+  });
 }

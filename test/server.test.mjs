@@ -122,6 +122,11 @@ test('local player assets compress and revalidate instead of resending every loa
     assert.ok(wire < decoded / 2, `expected compression, got ${wire} of ${decoded}`);
     assert.ok(decoded > 400000, 'hls.js should decode to its full size');
 
+    const version = etag.slice(1, -1);
+    const immutable = await fetch(origin + '/__local/hls.js?v=' + encodeURIComponent(version), { headers: { 'accept-encoding': 'gzip' } });
+    assert.match(immutable.headers.get('cache-control'), /immutable/);
+    await immutable.arrayBuffer();
+
     const revalidated = await fetch(origin + '/__local/hls.js', { headers: { 'if-none-match': etag, 'accept-encoding': 'gzip' } });
     assert.equal(revalidated.status, 304);
     assert.equal((await revalidated.arrayBuffer()).byteLength, 0);
@@ -131,6 +136,41 @@ test('local player assets compress and revalidate instead of resending every loa
     assert.equal(again.headers.get('etag'), etag);
     assert.equal((await again.arrayBuffer()).byteLength, decoded);
   } finally { await close(server); }
+});
+
+test('public scripts are shared from the proxy cache while legacy output stays separate', async () => {
+  let requests = 0;
+  let upstreamCookie;
+  const upstream = http.createServer((req, res) => {
+    requests++;
+    upstreamCookie = req.headers.cookie;
+    res.writeHead(200, { 'content-type': 'application/javascript', etag: '"asset-v1"' });
+    res.end('const url = "https://kino.watch/movie"; const value = window.data?.value;');
+  });
+  const upstreamOrigin = await listen(upstream);
+  const server = createServer({ upstreamRequest: (target, options, callback) => http.request(upstreamOrigin + target.pathname, { ...options, agent: false }, callback) });
+  const origin = await listen(server);
+  const ios12 = 'Mozilla/5.0 (iPad; CPU OS 12_5_5 like Mac OS X) AppleWebKit/605.1.15 Version/12.1.2 Safari/604.1';
+  try {
+    const first = await fetch(origin + '/assets/site.js', { headers: { 'user-agent': 'Chrome/120', cookie: 'PHPSESSID=private' } });
+    assert.match(first.headers.get('cache-control'), /max-age=300/);
+    assert.ok((await first.text()).includes('?.'));
+    assert.equal(upstreamCookie, undefined);
+    const shared = await fetch(origin + '/assets/site.js', { headers: { 'user-agent': 'Chrome/121' } });
+    const sharedText = await shared.text();
+    assert.ok(sharedText.includes('"/movie"'));
+    assert.ok(!sharedText.includes('kino.watch'));
+    assert.equal(requests, 1);
+    const revalidated = await fetch(origin + '/assets/site.js', { headers: { 'if-none-match': '"asset-v1"', 'cache-control': 'max-age=60' } });
+    assert.equal(revalidated.status, 304);
+    assert.equal(requests, 1);
+
+    const legacy = await fetch(origin + '/assets/site.js', { headers: { 'user-agent': ios12 } });
+    assert.ok(!(await legacy.text()).includes('?.'));
+    assert.equal(requests, 2);
+    await (await fetch(origin + '/assets/site.js', { headers: { 'user-agent': ios12 } })).arrayBuffer();
+    assert.equal(requests, 2);
+  } finally { await close(server); await close(upstream); }
 });
 
 test('script validators survive compilation so repeat visits revalidate', async () => {

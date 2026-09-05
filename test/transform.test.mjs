@@ -49,14 +49,30 @@ test('media playlists rewrite segments, encryption keys, and init sections', () 
   assert.deepEqual(urls, ['/path/key.bin','/path/init.mp4']);
   assert.equal(resolveMedia(result.split('\n').find(l => l.startsWith('/'))).search, '?token=one');
 });
-test('legacy pages remove the modern player runtime but retain live account scripts and playlist', () => {
-  const html = '<html><head></head><body><script>window.PLAYER_PLAYLIST=[];</script><script src="/shark/player.min.js"></script><script type="module" src="/shark/assets/vidstack-player.js"></script><script src="/libs/jquery.js"></script></body></html>';
-  const result = rewriteHTML(html, true);
+test('legacy player pages load only the compatibility assets needed by their playback path', () => {
+  const html = '<html><head></head><body><div class="player-shell"></div><script>window.PLAYER_PLAYLIST=[];</script><script src="/shark/player.min.js"></script><script type="module" src="/shark/assets/vidstack-player.js"></script><script src="/libs/jquery.js"></script></body></html>';
+  const versions = {
+    '/__local/compat.js': 'compat-hash',
+    '/__local/compat-player.css': 'css-hash',
+    '/__local/compat-player.js': 'player-hash',
+    '/__local/hls.js': 'hls-hash'
+  };
+  const result = rewriteHTML(html, true, { nativeHLS: true, assetVersions: versions });
   assert.ok(result.includes('window.PLAYER_PLAYLIST'));
   assert.ok(result.includes('/libs/jquery.js'));
   assert.ok(!result.includes('/shark/'));
-  assert.ok(result.includes('/__local/compat-player.js'));
+  assert.ok(result.includes('/__local/compat.js?v=compat-hash'));
+  assert.ok(result.includes('/__local/compat-player.css?v=css-hash'));
+  assert.ok(result.includes('/__local/compat-player.js?v=player-hash'));
+  assert.ok(!result.includes('/__local/hls.js'));
+  assert.ok(rewriteHTML(html, true).includes('/__local/hls.js'));
   assert.equal(rewriteHTML(html, false), html);
+});
+test('legacy catalogue pages do not load player assets', () => {
+  const result = rewriteHTML('<html><head></head><body><main>Catalog</main></body></html>', true);
+  assert.ok(result.includes('/__local/compat.js'));
+  assert.ok(!result.includes('compat-player'));
+  assert.ok(!result.includes('hls.js'));
 });
 test('all locally authored browser JavaScript parses as ES5', async () => {
   for (const name of ['compat.js','compat-player.js']) {

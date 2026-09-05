@@ -1,6 +1,6 @@
 # Verification record
 
-Verified on 2026-09-05 against the signed-in live service with Playwright.
+Verified on 2026-09-06 against the signed-in live service with Playwright.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
@@ -20,8 +20,9 @@ Verified on 2026-09-05 against the signed-in live service with Playwright.
 | Account progress readback | Test title returned zero immediately after saves on both local client and original website | Upstream behavior unresolved; browser-local resume fallback added |
 | Local resume | Sought to 67 seconds, reloaded, started playback, confirmed resume at 67 seconds; cleared test position afterward | Pass |
 | Older browser syntax | Local browser scripts parse as ES5; upstream legacy scripts transformed to Safari 12 target | Pass for checked syntax |
-| Transfer size and caching | Against a mock upstream, a legacy page fell from 669KB to 193KB on the wire for a client sending `gzip, deflate`, which is what Safari offers over plain HTTP, and to 180KB for a client that also accepts Brotli; a 2000-segment manifest fell from 32.9ms to 7.6ms; local player files answered `304` on reload. Through a throttled link, scripts and `hls.js` arrived 3.6–4.4x faster at 3–25 Mbit | Pass under measurement, not on device |
-| Regression checks | 16 automated checks, including CSRF cookie separation, unchanged account request bodies, cross-origin write rejection, video byte ranges, compressed documents, asset revalidation, and untouched relayed media | Pass |
+| Transfer size and caching | Against a mock upstream, a legacy page fell from 669KB to 193KB on the wire for a client sending `gzip, deflate`, which is what Safari offers over plain HTTP, and to 180KB for a client that also accepts Brotli. Local files use content-versioned immutable caching, and public site scripts/styles are cached in the proxy for five minutes. In a live test, a second fresh browser reached DOM-ready in 0.52s using the warm proxy asset cache, versus 6.48s while that proxy cache was cold. | Pass under measurement, not on device |
+| Deferred player traffic | An authenticated legacy title page loaded the compatibility player without `hls.js` or a manifest request. Opening quality settings made one manifest request; forced desktop compatibility playback made one request and decoded live video at 1280×694. | Pass in current browsers |
+| Regression checks | 18 automated checks, including CSRF cookie separation, unchanged account request bodies, cross-origin write rejection, video byte ranges, compressed documents, shared public assets, versioned local assets, and untouched relayed media | Pass |
 | iPad responsive layout | 768×1024 WebKit viewport, touch/mobile settings; no horizontal overflow | Pass in emulation |
 | Actual iOS 12 hardware | Awaiting user playback test | Pending |
 

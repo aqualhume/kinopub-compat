@@ -207,14 +207,22 @@ finishes loading. Several behaviours keep that small:
   browser advertises it.
 - The service is asked for compressed bytes too, so the upstream fetch is
   smaller as well. Bodies are expanded locally only to be rewritten.
-- The local player files, including `hls.js`, are read from disk once, kept
-  compressed in memory, and carry an `ETag`, so reloads answer `304` instead of
-  resending about 550 KB.
+- The proxy reuses one HTTP/2 connection to kino.watch, so concurrent page assets
+  do not each need their own upstream TLS connection.
+- Public site scripts and stylesheets are kept in a bounded five-minute memory
+  cache. A new browser or a device whose cache was evicted can reuse the proxy's
+  copy instead of fetching the same asset from kino.watch again.
+- Local compatibility files use content-versioned URLs and long-lived browser
+  caching. Catalogue pages do not load player files, and native-HLS Safari does
+  not download the 541 KB `hls.js` library.
 - Validators from the service are preserved on scripts and stylesheets, letting
   the browser reuse cached copies rather than refetch the site's assets on every
   page. Compiled files are tagged separately so the two variants never mix.
 - Compiled JavaScript is cached by content hash, and a page's inline scripts are
   compiled concurrently.
+- A title page waits until Play is pressed before requesting its manifest. Opening
+  quality settings requests the manifest on demand when native HLS needs the
+  variant list.
 - Video segments are streamed through untouched, with byte ranges and their
   original encoding preserved.
 
@@ -237,9 +245,9 @@ npm run check
 Tests cover device detection, cookie rewriting, local links, relay signature
 validation, HLS variants/audio/subtitles/keys/segments, and ES5 syntax for locally
 authored browser scripts. They also cover the transfer behaviour: documents
-survive the compression round-trip unchanged, local player files revalidate with
-a `304`, compiled scripts keep a validator distinct from the original bytes, and
-relayed media and partial responses are passed through untouched. See
+survive the compression round-trip unchanged, local files use immutable versioned
+URLs, public assets are shared safely, compiled scripts keep a validator distinct
+from the original bytes, and relayed media and partial responses are passed through untouched. See
 [VALIDATION.md](VALIDATION.md) for live browser checks and remaining device
 verification.
 
@@ -261,8 +269,8 @@ Browse on the device, then press Enter to print what it actually fetched:
 status, encoding, transferred bytes, and which responses were revalidated. It
 records only paths, sizes, and status codes; query strings, headers, cookies,
 and bodies are never stored, and signed media paths are collapsed. Use it to
-confirm that pages arrive compressed, that player files answer `304` on a second
-visit, and that video segments pass through unmodified.
+confirm that pages arrive compressed, that versioned player files remain cached,
+and that video segments pass through unmodified.
 
 ## Files
 
