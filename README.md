@@ -248,6 +248,22 @@ app. It receives a test session through a loopback-only JSON request, keeps cook
 in memory, launches WebKit, and closes after returning results. It never writes
 browser storage state. `WEBKIT_EXECUTABLE` can specify an existing WebKit binary.
 
+`scripts/observe-device.mjs` checks the transfer behaviour on real hardware
+without installing anything on the device. Start the app, start the relay, and
+open the relay's address on the iPad instead of the app's:
+
+```sh
+npm start                          # terminal 1, app on :3000
+node scripts/observe-device.mjs    # terminal 2, relay on :3001
+```
+
+Browse on the device, then press Enter to print what it actually fetched:
+status, encoding, transferred bytes, and which responses were revalidated. It
+records only paths, sizes, and status codes; query strings, headers, cookies,
+and bodies are never stored, and signed media paths are collapsed. Use it to
+confirm that pages arrive compressed, that player files answer `304` on a second
+visit, and that video segments pass through unmodified.
+
 ## Files
 
 - `server.mjs`: local HTTP server, upstream requests, sessions, document rewriting,
@@ -257,6 +273,7 @@ browser storage state. `WEBKIT_EXECUTABLE` can specify an existing WebKit binary
 - `public/compat-player.js` and `.css`: compatible player and account integration.
 - `public/compat.js`: browser API fallbacks for older Safari.
 - `test/`: focused automated checks.
+- `scripts/`: verification harnesses, separate from the app.
 
 No external payments, comments, messages, or account settings are submitted by
 the tests. Using those actions in the live interface operates on the real account.
