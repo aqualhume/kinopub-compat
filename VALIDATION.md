@@ -20,7 +20,8 @@ Verified on 2026-09-05 against the signed-in live service with Playwright.
 | Account progress readback | Test title returned zero immediately after saves on both local client and original website | Upstream behavior unresolved; browser-local resume fallback added |
 | Local resume | Sought to 67 seconds, reloaded, started playback, confirmed resume at 67 seconds; cleared test position afterward | Pass |
 | Older browser syntax | Local browser scripts parse as ES5; upstream legacy scripts transformed to Safari 12 target | Pass for checked syntax |
-| Regression checks | 11 automated checks, including CSRF cookie separation, unchanged account request bodies, cross-origin write rejection, and video byte ranges | Pass |
+| Transfer size and caching | Against a mock upstream, a legacy page fell from 671KB to 180KB on the wire and a 2000-segment manifest from 32.9ms to 7.6ms; through a throttled link, scripts and `hls.js` arrived 3.6–4.4x faster at 3–25 Mbit; local player files answered `304` on reload | Pass under measurement, not on device |
+| Regression checks | 16 automated checks, including CSRF cookie separation, unchanged account request bodies, cross-origin write rejection, video byte ranges, compressed documents, asset revalidation, and untouched relayed media | Pass |
 | iPad responsive layout | 768×1024 WebKit viewport, touch/mobile settings; no horizontal overflow | Pass in emulation |
 | Actual iOS 12 hardware | Awaiting user playback test | Pending |
 
@@ -28,6 +29,15 @@ Current WebKit with an iOS 12 user agent is **not** an iOS 12 runtime. It proves
 the native HLS route and responsive layout, not physical-device compatibility.
 AirPlay, picture-in-picture, native fullscreen, every account mutation, and
 payment flows have not all been exercised. These remain platform/service-dependent.
+
+The transfer figures come from a mock upstream and a bandwidth-throttled loopback
+relay, which isolate the server's own cost. Against the live service, network
+latency dominates a first visit, so an observed page load improves by less than
+those ratios suggest. On realistic page markup, compressing repaid its own cost
+at every size measured, from a 0.7KB fragment upward; the cost itself is about
+0.03ms on a small document and 0.26ms on 24KB of script. Sub-millisecond
+comparisons on small documents sit within measurement noise and should not be
+read as a difference. No timing has been taken on iOS 12 hardware.
 
 Reference screenshots and temporary browser artifacts are ignored by Git.
 Authenticated browser state is never persisted by the test harness.
