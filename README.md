@@ -191,9 +191,30 @@ Login cookies remain in the browser according to their expiry. Player
 preferences and fallback resume positions use browser local storage.
 
 The server has no local catalog database and does not cache movies. It keeps
-only a small in-memory cache of transformed JavaScript. Restarting it clears
-that cache and changes the media-signing key, so an already-open video page may
-need reloading.
+only a small in-memory cache of transformed JavaScript and the local player
+files. Restarting it clears those caches and changes the media-signing key, so
+an already-open video page may need reloading.
+
+### Response speed
+
+Pages are adapted in memory, so the work the server adds is measured in
+milliseconds; transfer size is what usually decides how quickly an old iPad
+finishes loading. Several behaviours keep that small:
+
+- Pages, scripts, stylesheets, and playlists are sent compressed (Brotli or
+  gzip) when the browser accepts it, which is roughly a 3–10x reduction.
+- The service is asked for compressed bytes too, so the upstream fetch is
+  smaller as well. Bodies are expanded locally only to be rewritten.
+- The local player files, including `hls.js`, are read from disk once, kept
+  compressed in memory, and carry an `ETag`, so reloads answer `304` instead of
+  resending about 550 KB.
+- Validators from the service are preserved on scripts and stylesheets, letting
+  the browser reuse cached copies rather than refetch the site's assets on every
+  page. Compiled files are tagged separately so the two variants never mix.
+- Compiled JavaScript is cached by content hash, and a page's inline scripts are
+  compiled concurrently.
+- Video segments are streamed through untouched, with byte ranges and their
+  original encoding preserved.
 
 Your computer, the local server, your network connection, and kino.watch must
 all remain available. The local additions provide compatibility and request
