@@ -1,5 +1,34 @@
 # Verification record
 
+Watch-position investigation on 2026-09-08 reproduced an authentication bug:
+filtering a leading local cookie left whitespace at the start of the forwarded
+Cookie header. A real local HTTP/2 upstream then received no Cookie header at
+all. Trimming each retained cookie fixes all tested cookie orders. Another
+regression reproduced cancellation of a fully uploaded progress POST when the
+client disconnected; that write now finishes within the upstream timeout.
+
+Expanded Playwright checks use an authenticated, stateful local upstream and
+real HLS playback. They cover periodic saves, pause/sleep flushes, a rejected
+beacon, HTML returned instead of a save acknowledgement, retry, stale upstream
+positions, and resume with local storage cleared. The live service also accepted
+a save through the compatibility player's UI and returned position 660 on a
+fresh original-site page after a short delay. The test title was reset to its
+initial unwatched state. These observations supersede the earlier unresolved
+progress-readback entry below; a successful POST alone is not the readback test.
+
+Playback recovery checks added on 2026-09-07 use generated HLS video, a local
+HTTP/2 upstream, and fresh Playwright browser profiles. Both Chrome (hls.js) and
+WebKit (native HLS with an iOS 12 user agent) resumed after simulated page
+suspension, an offline interval longer than the test proxy's idle timeout, and
+discarding the media source. Position and 1.25× speed were retained; Retry after
+a media error resumed at 25 seconds, before any account progress save. No
+uncaught page errors occurred. The browser test also covers a seek to zero and
+the Play event used by native controls. Run `npm run test:playback`; see README
+for browser selection and prerequisites.
+
+These are browser recovery tests, not a physical iPad screen-lock test. The
+earlier signed-in live-service checks below have not been repeated in this run.
+
 Verified on 2026-09-06 against the signed-in live service with Playwright.
 
 | Requirement | Evidence | Status |

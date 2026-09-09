@@ -208,7 +208,10 @@ finishes loading. Several behaviours keep that small:
 - The service is asked for compressed bytes too, so the upstream fetch is
   smaller as well. Bodies are expanded locally only to be rewritten.
 - The proxy reuses one HTTP/2 connection to kino.watch, so concurrent page assets
-  do not each need their own upstream TLS connection.
+  do not each need their own upstream TLS connection. Idle sessions expire after
+  30 seconds. Failed sessions are retired, and a bodyless GET or HEAD can retry
+  once on a fresh session before response headers arrive. Account writes are
+  never retried automatically.
 - Public site scripts and stylesheets are kept in a bounded five-minute memory
   cache. A new browser or a device whose cache was evicted can reuse the proxy's
   copy instead of fetching the same asset from kino.watch again.
@@ -225,6 +228,28 @@ finishes loading. Several behaviours keep that small:
   variant list.
 - Video segments are streamed through untouched, with byte ranges and their
   original encoding preserved.
+
+After the player page is suspended, pressing Play rebuilds the media source at
+the current position and restores playback preferences. Returning to the page
+does not start playback automatically. Ordinary pause/resume keeps the existing
+source. Retry after a media error also preserves positions before the first
+account progress save.
+
+Upstream requests have a 15-second deadline for response headers and a 45-second
+inactivity timeout during transfer. Failures log their code, stage, and attempt
+number, for example `ERR_UPSTREAM_HEADERS_TIMEOUT (site, headers, attempt 2)`.
+Logs omit URLs and credentials. Browser cancellations release upstream work
+without reporting an upstream failure. A fully uploaded watch-position save is
+allowed to finish within those deadlines even if the device disconnects before
+receiving its acknowledgement. Incomplete uploads are cancelled.
+
+The compatibility player saves account progress during playback at 15-second
+intervals once the position reaches 60 seconds, matching the original player's
+threshold. Pause, seeking, episode changes, and page suspension flush the latest
+position. Rejected beacons fall back to a keepalive request, and a failed account
+save remains eligible for retry. Local progress is also retained before the
+60-second threshold. A newer local position can override unchanged upstream
+readback; a changed server position remains authoritative for other devices.
 
 Your computer, the local server, your network connection, and kino.watch must
 all remain available. The local additions provide compatibility and request
@@ -250,6 +275,26 @@ URLs, public assets are shared safely, compiled scripts keep a validator distinc
 from the original bytes, and relayed media and partial responses are passed through untouched. See
 [VALIDATION.md](VALIDATION.md) for live browser checks and remaining device
 verification.
+
+`npm test` also exercises real local HTTP/2 connections: idle expiry, stuck
+streams, GOAWAY, cancellation, bounded retries, POST timeouts, and truncated
+responses. To test actual playback with Playwright, install `ffmpeg` and the
+desired browser, then run:
+
+```sh
+npx playwright install webkit
+npm run test:playback                         # WebKit, native HLS
+TEST_BROWSER=chromium npm run test:playback   # installed Chrome, hls.js
+```
+
+`WEBKIT_EXECUTABLE` can point to an existing WebKit launcher. The playback test
+generates temporary HLS video and runs through a local HTTP/2 upstream and the
+proxy with a fresh browser profile. It checks ordinary pause/resume, simulated
+page suspension with a network outage and discarded media source, position and
+speed retention, and recovery after a media error. It also checks authenticated
+periodic/final progress saves, rejected beacons, failed-save retries, stale
+readback, and account resume after clearing local storage. It needs no account or live
+service. Actual iPad screen locking still requires a device check.
 
 `scripts/verify-webkit.mjs` is a one-shot verification harness, separate from the
 app. It receives a test session through a loopback-only JSON request, keeps cookies

@@ -9,8 +9,10 @@
     var seasons = window.PLAYER_SEASONS || [];
     var season = window.PLAYER_CURRENT_SEASON || (playlist[0] && playlist[0].season);
     var itemId = window.PLAYER_ITEM_ID;
-    var hls = null, generation = 0, lastSent = -1, resume = 0, switching = false, hideTimer;
+    var hls = null, generation = 0, resume = 0, switching = false, hideTimer;
+    var progressStates = Object.create(null);
     var current, requestPending = false, manifestSource = '', mediaReady = false;
+    var needsReload = false, lastPosition = 0;
     var qualities = [], qualitiesFor = '', qualitiesLoading = false;
     var csrf = document.querySelector('meta[name="csrf-token"]');
     var csrfParam = document.querySelector('meta[name="csrf-param"]');
@@ -53,21 +55,69 @@
     function post(path, fields, beacon) {
       if (csrf) fields[csrfParam ? csrfParam.content : '_csrf'] = csrf.content;
       var body = Object.keys(fields).map(function (key) { return encodeURIComponent(key) + '=' + encodeURIComponent(fields[key]); }).join('&');
-      if (beacon && navigator.sendBeacon) { navigator.sendBeacon(path, new Blob([body], { type: 'application/x-www-form-urlencoded' })); return Promise.resolve(); }
-      return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf ? csrf.content : '' }, body: body }).then(function (r) {
+      if (beacon && navigator.sendBeacon) {
+        try {
+          // Queued is not an acknowledgement from the account service.
+          if (navigator.sendBeacon(path, new Blob([body], { type: 'application/x-www-form-urlencoded' }))) return Promise.resolve(false);
+        } catch (e) { /* Fall back when the browser cannot queue a beacon. */ }
+      }
+      return fetch(path, { method: 'POST', credentials: 'same-origin', keepalive: !!beacon, headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf ? csrf.content : '' }, body: body }).then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.text().then(function (text) {
-          var data; try { data = JSON.parse(text); } catch (e) { return; }
+          var data; try { data = JSON.parse(text); } catch (e) {
+            if (path === '/item/media-marktime') throw new Error('Invalid progress response');
+          }
+          if (path === '/item/media-marktime' && (!data || data.success !== true)) throw new Error('Save rejected');
           if (data && data.success === false) throw new Error('Save rejected');
+          return true;
         });
       });
     }
-    function saveProgress(beacon) {
-      var time = Math.floor(video.currentTime || 0);
-      if (switching || !current || !current.media_id || time < 60 || Math.abs(time - lastSent) < 10) return;
-      lastSent = time; current.marktime = time;
-      setting(progressKey(current), time);
-      post('/item/media-marktime', { media_id: current.media_id, time: time }, beacon).catch(function () { lastSent = -1; });
+    function progressState(entry) {
+      var key = String(entry.media_id);
+      if (!progressStates[key]) progressStates[key] = { serverTime: Number(entry.marktime) || 0, savedTime: null, latest: 0, lastAttempt: -Infinity, inFlight: false };
+      return progressStates[key];
+    }
+    function rememberProgress(entry, state) {
+      setting(progressKey(entry), JSON.stringify({ time: state.latest, serverTime: state.serverTime, savedTime: state.savedTime }));
+    }
+    function resumePosition(entry) {
+      var serverTime = Number(entry.marktime) || 0, saved;
+      try { saved = JSON.parse(getSetting(progressKey(entry), 'null')); } catch (e) {}
+      // An unchanged server value may predate the most recent local save. A
+      // different value can come from another device and remains authoritative.
+      if (saved && typeof saved === 'object' && typeof saved.time === 'number' && isFinite(saved.time) && saved.time >= 0 &&
+          (serverTime === saved.serverTime || serverTime === saved.savedTime)) return saved.time;
+      // Migrate the older numeric fallback without overriding remote progress.
+      return serverTime || (typeof saved === 'number' && isFinite(saved) && saved > 0 ? saved : 0);
+    }
+    function sendProgress(entry, state, beacon, force) {
+      var time = state.latest, now = Date.now();
+      if (time < 60) return; // Match the service player's minimum save position.
+      if (!beacon && state.inFlight) { if (force) state.flushPending = true; return; }
+      if (!force && (now - state.lastAttempt < 15000 || (state.savedTime !== null && time >= state.savedTime && time - state.savedTime < 10))) return;
+      if (!beacon && state.savedTime === time) return;
+      state.lastAttempt = now;
+      if (!beacon) state.inFlight = true;
+      post('/item/media-marktime', { media_id: entry.media_id, time: time }, beacon).then(function (acknowledged) {
+        if (acknowledged) { state.savedTime = time; state.warned = false; rememberProgress(entry, state); }
+      }).catch(function (error) {
+        if (!state.warned) console.warn('Watch position could not be saved:', error.message);
+        state.warned = true;
+      }).then(function () {
+        if (!beacon) {
+          state.inFlight = false;
+          if (state.flushPending) { state.flushPending = false; sendProgress(entry, state, false, true); }
+        }
+      });
+    }
+    function saveProgress(beacon, force) {
+      if (switching || !mediaReady || resume || video.seeking || !current || !current.media_id) return;
+      var state = progressState(current), time = Math.floor(playbackPosition());
+      if (!isFinite(time) || time < 0) return;
+      current.marktime = time;
+      if (state.latest !== time) { state.latest = time; rememberProgress(current, state); }
+      sendProgress(current, state, !!beacon, !!force || !!beacon);
     }
     function complete(entry, done) {
       return post('/item/update-watching', { media_id: entry.media_id, c: done ? 1 : 0 }).then(function () { entry.completed = done ? 1 : 0; if (done) setting(progressKey(entry), 0); });
@@ -87,10 +137,28 @@
     }
     function startPlayback() {
       errorBox.hidden = true;
+      var thisLoad = generation;
       var result = video.play();
-      if (result && result.catch) result.catch(function (error) { if (error.name !== 'AbortError') message('Нажмите воспроизведение, чтобы начать просмотр.'); });
+      if (result && result.catch) result.catch(function (error) { if (thisLoad === generation && error.name !== 'AbortError') message('Нажмите воспроизведение, чтобы начать просмотр.'); });
+    }
+    function playbackPosition() {
+      return resume || (video.readyState ? video.currentTime : lastPosition) || 0;
+    }
+    function reloadMedia() {
+      // Rebuild the native HLS resource (or MSE instance) in the Play gesture.
+      // Calling play() alone cannot revive an errored/suspended media resource.
+      var position = playbackPosition();
+      switching = true; generation++; needsReload = false;
+      video.pause(); if (hls) { hls.destroy(); hls = null; }
+      mediaReady = false; qualitiesLoading = false;
+      video.removeAttribute('src'); video.load();
+      resume = position; lastPosition = position;
+      video.playbackRate = Number(getSetting('speed', '1'));
+      switching = false;
     }
     function play() {
+      if (!manifestSource) return;
+      if (needsReload || video.error) reloadMedia();
       if (!mediaReady) {
         mediaReady = true;
         var thisLoad = generation;
@@ -106,7 +174,7 @@
             var level = Number(getSetting('quality_hls', '-1'));
             if (level >= -1 && level < hls.levels.length) hls.currentLevel = level;
           });
-          hls.on(window.Hls.Events.ERROR, function (event, data) { if (data.fatal && thisLoad === generation) message('Не удалось загрузить видео. Проверьте подключение и повторите попытку.'); });
+          hls.on(window.Hls.Events.ERROR, function (event, data) { if (data.fatal && thisLoad === generation) { needsReload = true; message('Не удалось загрузить видео. Проверьте подключение и повторите попытку.'); } });
         } else { video.src = manifestSource; video.controls = true; }
       }
       startPlayback();
@@ -123,11 +191,12 @@
     }
     function load(entry, auto) {
       if (!entry) return;
-      saveProgress(); switching = true; generation++;
+      saveProgress(false, true); switching = true; generation++;
       video.pause(); if (hls) { hls.destroy(); hls = null; }
       mediaReady = false; qualities = []; qualitiesFor = ''; qualitiesLoading = false;
-      current = entry; lastSent = -1; resume = Number(entry.marktime) || Number(getSetting(progressKey(entry), '0')) || 0;
+      current = entry; progressState(entry); resume = resumePosition(entry);
       if (Number(entry.completed) === 1) resume = 0;
+      needsReload = false; lastPosition = resume;
       video.removeAttribute('src'); video.load();
       errorBox.hidden = true; shell.classList.remove('kw-hide-controls'); shell.classList.remove('kw-started');
       var title = (entry.title || '').split(' / ');
@@ -155,7 +224,7 @@
       requestPending = true;
       fetch('/item/playlist?id=' + encodeURIComponent(itemId) + '&season=' + encodeURIComponent(number), { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error(); return r.json(); }).then(function (data) {
         if (!data.success || !Array.isArray(data.episodes) || !data.episodes.length) throw new Error();
-        saveProgress(); playlist = data.episodes; season = number;
+        saveProgress(false, true); playlist = data.episodes; season = number;
         index = start === -1 ? playlist.length - 1 : (typeof start === 'number' ? start : data.firstUnwatchedIndex || 0);
         load(playlist[index], auto); episodePanel();
       }).catch(function () { message('Не удалось загрузить сезон. Повторите попытку.'); }).then(function () { requestPending = false; });
@@ -239,7 +308,7 @@
     shell.addEventListener('click', function (event) {
       var target = event.target.closest('[data-action]'); if (!target) { showControls(); return; }
       var action = target.getAttribute('data-action');
-      if (action === 'play') { if (video.paused) play(); else video.pause(); }
+      if (action === 'play') { if (video.paused || needsReload || video.error) play(); else video.pause(); }
       else if (action === 'back' || action === 'forward') video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + (action === 'back' ? -10 : 10)));
       else if (action === 'volume') { video.muted = !video.muted; target.setAttribute('aria-label', video.muted ? 'Включить звук' : 'Выключить звук'); target.style.opacity = video.muted ? '0.4' : '1'; }
       else if (action === 'episodes') episodePanel();
@@ -252,25 +321,47 @@
       } else if (action === 'pip') {
         if (video.webkitSetPresentationMode) video.webkitSetPresentationMode('picture-in-picture');
         else if (video.requestPictureInPicture) video.requestPictureInPicture().catch(function () {});
-      } else if (action === 'retry') load(current, true);
+      } else if (action === 'retry') { reloadMedia(); play(); }
       showControls();
     });
     seek.addEventListener('input', function () { if (video.readyState) video.currentTime = Number(seek.value); updateUI(); showControls(); });
-    video.addEventListener('loadedmetadata', function () { if (resume > 0 && resume < video.duration - 3) { video.currentTime = resume; } resume = 0; restoreTracks(); updateUI(); });
-    video.addEventListener('timeupdate', function () { updateUI(); saveProgress(); });
-    video.addEventListener('play', function () { updateUI(); showControls(); });
-    video.addEventListener('pause', function () { updateUI(); saveProgress(); showControls(); });
+    video.addEventListener('loadedmetadata', function () {
+      if (resume > 0 && resume < video.duration - 3) video.currentTime = resume;
+      resume = 0;
+      // Loading a new source resets playbackRate to defaultPlaybackRate.
+      video.playbackRate = Number(getSetting('speed', '1'));
+      restoreTracks(); updateUI();
+    });
+    video.addEventListener('timeupdate', function () {
+      if (!switching && video.readyState && !resume) {
+        // Continued playback (including AirPlay) needs no rebuild on return.
+        if (!document.hidden && !video.paused && video.currentTime > lastPosition) needsReload = false;
+        lastPosition = video.currentTime;
+      }
+      updateUI(); saveProgress();
+    });
+    video.addEventListener('play', function () {
+      // Native fullscreen controls bypass the custom Play button.
+      if (needsReload && !switching && !document.hidden) { play(); return; }
+      updateUI(); showControls();
+    });
+    video.addEventListener('pause', function () { updateUI(); saveProgress(false, true); showControls(); });
+    video.addEventListener('seeked', function () { saveProgress(false, true); });
     video.addEventListener('playing', function () { errorBox.hidden = true; shell.classList.add('kw-started'); });
-    video.addEventListener('error', function () { if (!switching && video.error) message('Не удалось воспроизвести видео. Повторите попытку или выберите другой эпизод.'); });
+    video.addEventListener('error', function () { if (!switching && video.error) { needsReload = true; message('Не удалось воспроизвести видео. Повторите попытку или выберите другой эпизод.'); } });
     video.addEventListener('ended', function () { complete(current, true).catch(function () {}); if (getSetting('autoplay', '1') === '1') next(1); });
     shell.addEventListener('mousemove', showControls);
     shell.addEventListener('touchstart', showControls, { passive: true });
-    document.addEventListener('visibilitychange', function () { if (document.hidden) saveProgress(true); });
-    window.addEventListener('pagehide', function () { saveProgress(true); });
+    function suspend() {
+      if (mediaReady) { lastPosition = playbackPosition(); needsReload = true; }
+      saveProgress(true);
+    }
+    document.addEventListener('visibilitychange', function () { if (document.hidden) suspend(); });
+    window.addEventListener('pagehide', suspend);
     document.addEventListener('keydown', function (event) {
       if (/INPUT|TEXTAREA|SELECT/.test(event.target.tagName) || event.target.isContentEditable) return;
       if (event.key === 'Escape') { panel.hidden = true; showControls(); }
-      if (event.key === ' ' && shell.contains(document.activeElement)) { event.preventDefault(); if (video.paused) play(); else video.pause(); }
+      if (event.key === ' ' && shell.contains(document.activeElement)) { event.preventDefault(); if (video.paused || needsReload || video.error) play(); else video.pause(); }
     });
     // Site season links remain ordinary working navigation. Its trailer needs no
     // modern video.js runtime on iOS: Safari can play it directly.

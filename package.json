@@ -9,6 +9,7 @@
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
     "test": "node --test test/*.test.mjs",
+    "test:playback": "node scripts/verify-resume.mjs",
     "check": "node --check server.mjs && node --check public/compat-player.js && node --check public/compat.js"
   },
   "dependencies": { "esbuild": "0.25.10", "hls.js": "1.6.13" },

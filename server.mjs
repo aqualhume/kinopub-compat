@@ -1,6 +1,4 @@
 import http from 'node:http';
-import http2 from 'node:http2';
-import https from 'node:https';
 import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -8,13 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
 import { pipeline } from 'node:stream/promises';
 import { transform } from 'esbuild';
+import { createUpstreamTransport, forwardUpstream, upstreamError } from './lib/upstream.mjs';
 import { UPSTREAM, isLegacy, localize, rewriteCookie, rewriteHTML, rewriteManifest, resolveMedia } from './lib/transform.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
-// Non-kino.watch HTTPS traffic, principally relayed CDN media, retains warm TLS
-// sockets. kino.watch itself uses the multiplexed HTTP/2 session below.
-const transport = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 128, maxFreeSockets: 32, scheduling: 'lifo' });
-const h2Sessions = new Map();
 const hopHeaders = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade']);
 const javascriptCache = new Map();
 const serviceCookieNames = new Set(['PHPSESSID', '_identity', '_csrf', 'token']);
@@ -34,42 +29,6 @@ const MIN_COMPRESS = 1024;
 const PUBLIC_ASSET_TTL = 5 * 60 * 1000;
 const PUBLIC_ASSET_CACHE_BYTES = 32 * 1024 * 1024;
 const PUBLIC_ASSET_ENTRY_BYTES = 4 * 1024 * 1024;
-
-// kino.watch supports HTTP/2. One multiplexed TLS session avoids opening a
-// fresh upstream socket for each of the browser's concurrent asset requests.
-function upstreamHTTP2Request(target, options, callback) {
-  let session = h2Sessions.get(target.origin);
-  if (!session || session.closed || session.destroyed) {
-    session = http2.connect(target.origin);
-    h2Sessions.set(target.origin, session);
-    session.on('close', () => { if (h2Sessions.get(target.origin) === session) h2Sessions.delete(target.origin); });
-    session.on('goaway', () => { if (h2Sessions.get(target.origin) === session) h2Sessions.delete(target.origin); });
-    session.on('error', () => {});
-  }
-  const headers = {
-    ':method': options.method,
-    ':scheme': target.protocol.slice(0, -1),
-    ':authority': target.host,
-    ':path': target.pathname + target.search
-  };
-  for (const [key, value] of Object.entries(options.headers || {})) {
-    if (key !== 'host' && !key.startsWith(':')) headers[key] = value;
-  }
-  const stream = session.request(headers);
-  stream.once('response', incoming => {
-    const responseHeaders = {};
-    for (const [key, value] of Object.entries(incoming)) if (!key.startsWith(':')) responseHeaders[key] = value;
-    stream.headers = responseHeaders;
-    stream.statusCode = Number(incoming[':status']);
-    stream.httpVersion = '2.0';
-    callback(stream);
-  });
-  return stream;
-}
-
-function defaultUpstreamRequest(target, options, callback) {
-  return target.origin === UPSTREAM ? upstreamHTTP2Request(target, options, callback) : https.request(target, options, callback);
-}
 
 function isPublicAsset(pathname) {
   return /^\/(?:assets|css|libs|images)\//.test(pathname);
@@ -131,7 +90,8 @@ function decompress(buffer, encoding = '') {
   }
 }
 
-export function createServer({ upstreamRequest = defaultUpstreamRequest } = {}) {
+export function createServer({ upstreamRequest, http2Connect, idleTimeoutMs, headersTimeoutMs, bodyTimeoutMs } = {}) {
+  const transport = createUpstreamTransport({ http2Connect, idleTimeoutMs });
   const publicAssets = new Map();
   let publicAssetBytes = 0;
 
@@ -187,7 +147,7 @@ export function createServer({ upstreamRequest = defaultUpstreamRequest } = {}) 
     res.end(req.method === 'HEAD' ? undefined : body);
   }
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
       const local = new URL(req.url, 'http://local.invalid');
       if (local.pathname === '/__local/health') {
@@ -254,10 +214,10 @@ export function createServer({ upstreamRequest = defaultUpstreamRequest } = {}) 
       // 304 for a body this proxy had compiled.
       if (headers['if-none-match']) headers['if-none-match'] = String(headers['if-none-match']).replace(/"c12~/g, '"');
       if (target.origin === UPSTREAM) {
-        if (req.headers.cookie && !publicAsset) headers.cookie = req.headers.cookie.split(';').filter(c => {
-          const name = c.trim().split('=')[0];
+        if (req.headers.cookie && !publicAsset) headers.cookie = req.headers.cookie.split(';').map(c => c.trim()).filter(c => {
+          const name = c.split('=')[0];
           return serviceCookieNames.has(name) || name.endsWith('-filter');
-        }).join(';');
+        }).join('; ');
         if (req.headers.origin) headers.origin = UPSTREAM;
         if (req.headers.referer) {
           try { const ref = new URL(req.headers.referer); headers.referer = UPSTREAM + ref.pathname + ref.search; } catch {}
@@ -269,114 +229,108 @@ export function createServer({ upstreamRequest = defaultUpstreamRequest } = {}) 
         try { sameOrigin = new URL(req.headers.origin).host === req.headers.host; } catch {}
         if (!sameOrigin) { res.writeHead(403); return res.end('Origin rejected'); }
       }
-      await new Promise((resolve) => {
-        const upstream = upstreamRequest(target, { method: req.method, headers, agent: transport }, async response => {
-          try {
-            const type = response.headers['content-type'] || '';
-            const manifest = /mpegurl/i.test(type) || /\.m3u8(?:$|\?)/i.test(target.href);
-            const html = /text\/html/i.test(type);
-            const script = /(?:javascript|ecmascript)/i.test(type);
-            const style = /text\/css/i.test(type);
-            // A partial response is a fragment of a larger file. Rewriting or
-            // recompressing one would corrupt it, so it is always relayed as-is.
-            const partial = response.statusCode === 206 || response.headers['content-range'] !== undefined;
-            const textual = !partial && (html || script || style || /application\/json/i.test(type) || manifest);
-            // Scripts and stylesheets rewrite deterministically, so their
-            // validators stay usable and repeat visits can answer with a 304
-            // instead of resending and recompiling the whole file.
-            const keepValidators = textual && (script || style) && !manifest;
-            const cachePublicResponse = publicAsset && response.statusCode === 200 && keepValidators && !response.headers['set-cookie'] && !/\b(?:private|no-store)\b/i.test(response.headers['cache-control'] || '');
-            for (const [key, value] of Object.entries(response.headers)) {
-              if (hopHeaders.has(key) || ['set-cookie','content-length','content-encoding','strict-transport-security','content-security-policy','content-security-policy-report-only','access-control-allow-origin'].includes(key)) continue;
-              if (textual && key === 'content-md5') continue;
-              if (textual && !keepValidators && ['etag','last-modified'].includes(key)) continue;
-              if (key === 'location') res.setHeader(key, localize(String(value)));
-              else if (value !== undefined) res.setHeader(key, value);
+      await forwardUpstream(req, res, target, headers, { transport, upstreamRequest, headersTimeoutMs, bodyTimeoutMs }, async response => {
+        const type = response.headers['content-type'] || '';
+        const manifest = /mpegurl/i.test(type) || /\.m3u8(?:$|\?)/i.test(target.href);
+        const html = /text\/html/i.test(type);
+        const script = /(?:javascript|ecmascript)/i.test(type);
+        const style = /text\/css/i.test(type);
+        // A partial response is a fragment of a larger file. Rewriting or
+        // recompressing one would corrupt it, so it is always relayed as-is.
+        const partial = response.statusCode === 206 || response.headers['content-range'] !== undefined;
+        const textual = !partial && (html || script || style || /application\/json/i.test(type) || manifest);
+        // Scripts and stylesheets rewrite deterministically, so their
+        // validators stay usable and repeat visits can answer with a 304
+        // instead of resending and recompiling the whole file.
+        const keepValidators = textual && (script || style) && !manifest;
+        const cachePublicResponse = publicAsset && response.statusCode === 200 && keepValidators && !response.headers['set-cookie'] && !/\b(?:private|no-store)\b/i.test(response.headers['cache-control'] || '');
+        for (const [key, value] of Object.entries(response.headers)) {
+          if (hopHeaders.has(key) || ['set-cookie','content-length','content-encoding','strict-transport-security','content-security-policy','content-security-policy-report-only','access-control-allow-origin'].includes(key)) continue;
+          if (textual && key === 'content-md5') continue;
+          if (textual && !keepValidators && ['etag','last-modified'].includes(key)) continue;
+          if (key === 'location') res.setHeader(key, localize(String(value)));
+          else if (value !== undefined) res.setHeader(key, value);
+        }
+        // The signed manifest service generates its own anonymous CSRF
+        // cookie. Applying that cookie would invalidate the account page's
+        // token and break bookmarks and other subsequent form submissions.
+        const accountResponse = !relay && !target.pathname.startsWith('/manifest/');
+        if (accountResponse && target.origin === UPSTREAM && response.headers['set-cookie']) {
+          for (const cookie of response.headers['set-cookie']) serviceCookieNames.add(cookie.split('=')[0]);
+          res.setHeader('set-cookie', [...(res.getHeader('set-cookie') ? [res.getHeader('set-cookie')] : []), ...response.headers['set-cookie'].map(c => rewriteCookie(c, false))]);
+        }
+        if (html || /json/i.test(type) || manifest) res.setHeader('cache-control', 'private, no-store');
+        // Only account documents differ per session. Listing Cookie on
+        // scripts and stylesheets would stop a browser from reusing them,
+        // forcing a full re-download of the site's assets on every page.
+        if (keepValidators) res.setHeader('vary', 'User-Agent, Accept-Encoding');
+        else if (textual) res.setHeader('vary', 'User-Agent, Cookie, Accept-Encoding');
+        if (cachePublicResponse) res.setHeader('cache-control', 'public, max-age=300');
+        // A compiled body differs from the upstream bytes, so its validator
+        // is marked to prevent a cache from mixing the two variants when the
+        // compatibility mode is toggled in the same browser.
+        if (keepValidators && legacy && script) {
+          const tag = res.getHeader('etag');
+          if (tag) res.setHeader('etag', String(tag).replace(/^(W\/)?"/, '$1"c12~'));
+        }
+        res.statusCode = response.statusCode;
+        // A revalidated or empty response carries no body to rewrite.
+        if (req.method === 'HEAD' || response.statusCode === 304 || response.statusCode === 204) {
+          response.resume(); res.end(); return;
+        }
+        if (!textual) {
+          if (response.headers['content-length']) res.setHeader('content-length', response.headers['content-length']);
+          if (response.headers['content-encoding']) res.setHeader('content-encoding', response.headers['content-encoding']);
+          await pipeline(response, res);
+        } else {
+          const chunks = []; let size = 0;
+          for await (const chunk of response) {
+            size += chunk.length;
+            if (size > 24 * 1024 * 1024) throw upstreamError('ERR_UPSTREAM_DOCUMENT_TOO_LARGE');
+            chunks.push(chunk);
+          }
+          let body = decompress(Buffer.concat(chunks), response.headers['content-encoding']).toString('utf8');
+          if (manifest) body = rewriteManifest(body, target.href, legacy, quality);
+          else if (html) {
+            body = rewriteHTML(body, legacy, {
+              nativeHLS: isLegacy(req.headers['user-agent']),
+              assetVersions: legacy ? await localAssetVersionsReady : null
+            });
+            if (legacy) body = await compileInline(body);
+          } else {
+            body = localize(body);
+            if (script && legacy) {
+              try { body = await compile(body, true); } catch { /* Serve the original on unparsable input. */ }
             }
-            // The signed manifest service generates its own anonymous CSRF
-            // cookie. Applying that cookie would invalidate the account page's
-            // token and break bookmarks and other subsequent form submissions.
-            const accountResponse = !relay && !target.pathname.startsWith('/manifest/');
-            if (accountResponse && target.origin === UPSTREAM && response.headers['set-cookie']) {
-              for (const cookie of response.headers['set-cookie']) serviceCookieNames.add(cookie.split('=')[0]);
-              res.setHeader('set-cookie', [...(res.getHeader('set-cookie') ? [res.getHeader('set-cookie')] : []), ...response.headers['set-cookie'].map(c => rewriteCookie(c, false))]);
-            }
-            if (html || /json/i.test(type) || manifest) res.setHeader('cache-control', 'private, no-store');
-            // Only account documents differ per session. Listing Cookie on
-            // scripts and stylesheets would stop a browser from reusing them,
-            // forcing a full re-download of the site's assets on every page.
-            if (keepValidators) res.setHeader('vary', 'User-Agent, Accept-Encoding');
-            else if (textual) res.setHeader('vary', 'User-Agent, Cookie, Accept-Encoding');
-            if (cachePublicResponse) res.setHeader('cache-control', 'public, max-age=300');
-            // A compiled body differs from the upstream bytes, so its validator
-            // is marked to prevent a cache from mixing the two variants when the
-            // compatibility mode is toggled in the same browser.
-            if (keepValidators && legacy && script) {
-              const tag = res.getHeader('etag');
-              if (tag) res.setHeader('etag', String(tag).replace(/^(W\/)?"/, '$1"c12~'));
-            }
-            res.statusCode = response.statusCode;
-            // A revalidated or empty response carries no body to rewrite.
-            if (req.method === 'HEAD' || response.statusCode === 304 || response.statusCode === 204) {
-              response.resume(); res.end(); resolve(); return;
-            }
-            if (!textual) {
-              if (response.headers['content-length']) res.setHeader('content-length', response.headers['content-length']);
-              if (response.headers['content-encoding']) res.setHeader('content-encoding', response.headers['content-encoding']);
-              await pipeline(response, res);
-            } else {
-              const chunks = []; let size = 0;
-              for await (const chunk of response) {
-                size += chunk.length;
-                if (size > 24 * 1024 * 1024) throw new Error('Upstream document too large');
-                chunks.push(chunk);
-              }
-              let body = decompress(Buffer.concat(chunks), response.headers['content-encoding']).toString('utf8');
-              if (manifest) body = rewriteManifest(body, target.href, legacy, quality);
-              else if (html) {
-                body = rewriteHTML(body, legacy, {
-                  nativeHLS: isLegacy(req.headers['user-agent']),
-                  assetVersions: legacy ? await localAssetVersionsReady : null
-                });
-                if (legacy) body = await compileInline(body);
-              } else {
-                body = localize(body);
-                if (script && legacy) {
-                  try { body = await compile(body, true); } catch { /* Serve the original on unparsable input. */ }
-                }
-              }
-              // Compressing here shrinks the slow hop to the device, which
-              // dominates page time far more than the rewriting itself.
-              const buffer = Buffer.from(body, 'utf8');
-              const encoded = compressBody(req.headers['accept-encoding'], buffer);
-              if (encoded) res.setHeader('content-encoding', encoded.encoding);
-              const out = encoded ? encoded.body : buffer;
-              res.setHeader('content-length', String(out.length));
-              if (cachePublicResponse) {
-                const cachedHeaders = { ...res.getHeaders() };
-                delete cachedHeaders['content-length']; delete cachedHeaders['content-encoding'];
-                delete cachedHeaders['set-cookie']; delete cachedHeaders.date;
-                storePublicAsset(publicAssetKey, {
-                  body: buffer,
-                  encoded: encoded ? { [encoded.encoding]: out } : {},
-                  headers: cachedHeaders,
-                  stored: Date.now(),
-                  expires: Date.now() + PUBLIC_ASSET_TTL,
-                  size: buffer.length + (encoded ? out.length : 0)
-                });
-              }
-              res.end(out);
-            }
-          } catch (error) { fail(res, error); }
-          finally { resolve(); }
-        });
-        upstream.setTimeout(45000, () => upstream.destroy(new Error('Upstream timeout')));
-        upstream.on('error', error => { fail(res, error); resolve(); });
-        res.on('close', () => { if (!res.writableEnded) upstream.destroy(); });
-        req.pipe(upstream);
-      });
+          }
+          // Compressing here shrinks the slow hop to the device, which
+          // dominates page time far more than the rewriting itself.
+          if (res.destroyed) return;
+          const buffer = Buffer.from(body, 'utf8');
+          const encoded = compressBody(req.headers['accept-encoding'], buffer);
+          if (encoded) res.setHeader('content-encoding', encoded.encoding);
+          const out = encoded ? encoded.body : buffer;
+          res.setHeader('content-length', String(out.length));
+          if (cachePublicResponse) {
+            const cachedHeaders = { ...res.getHeaders() };
+            delete cachedHeaders['content-length']; delete cachedHeaders['content-encoding'];
+            delete cachedHeaders['set-cookie']; delete cachedHeaders.date;
+            storePublicAsset(publicAssetKey, {
+              body: buffer,
+              encoded: encoded ? { [encoded.encoding]: out } : {},
+              headers: cachedHeaders,
+              stored: Date.now(),
+              expires: Date.now() + PUBLIC_ASSET_TTL,
+              size: buffer.length + (encoded ? out.length : 0)
+            });
+          }
+          res.end(out);
+        }
+      }, (error, context) => fail(res, error, context));
     } catch (error) { fail(res, error); }
   });
+  server.on('close', () => transport.destroy());
+  return server;
 }
 
 // Compiling to Safari 12 syntax is the most expensive step on legacy pages.
@@ -417,11 +371,15 @@ async function compileInline(body) {
   return last ? out + body.slice(last) : body;
 }
 
-function fail(res, error) {
-  if (res.destroyed) return;
+function fail(res, error, { phase = 'rewrite', attempts = 1, kind = 'site' } = {}) {
+  // Codes and fixed context explain failures without leaking signed URLs,
+  // credentials, or arbitrary upstream error messages.
+  const code = /^[A-Z][A-Z0-9_]{1,79}$/.test(error.code || '') ? error.code : 'ERR_UPSTREAM_FAILURE';
+  console.error(`Upstream request failed: ${code} (${kind}, ${phase}, attempt ${attempts})`);
+  if (res.destroyed || res.writableEnded) return;
   if (res.headersSent) { res.destroy(); return; }
-  // Do not log request URLs, credentials, signed manifests, or response bodies.
-  console.error('Upstream request failed:', error.code || error.name || 'Error');
+  // Discard success headers already copied from an incomplete upstream body.
+  for (const name of res.getHeaderNames()) res.removeHeader(name);
   res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
   res.end('<!doctype html><html lang="ru"><meta name="viewport" content="width=device-width"><title>Нет соединения</title><body style="background:#1c202b;color:#ddd;font:18px sans-serif;padding:32px"><h1>Нет соединения с Кинопаб</h1><p>Проверьте подключение к интернету и повторите попытку.</p><button onclick="location.reload()">Повторить</button></body></html>');
 }
@@ -442,8 +400,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   });
   server.on('error', error => { console.error(error.message); process.exitCode = 1; });
   for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => {
-    server.close(); transport.destroy();
-    for (const session of h2Sessions.values()) session.destroy();
-    h2Sessions.clear();
+    server.close(); server.closeAllConnections();
   });
 }
