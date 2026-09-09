@@ -29,6 +29,12 @@ network address (for example, `http://192.168.x.x:3000`).
 Open that address in Safari on an iPad connected to the same network, and log in
 using the page. Keep the computer and server running while watching.
 
+On Windows, run `install-windows.cmd` from this directory as Administrator. It
+installs production dependencies, creates the `KinoPub Compat Proxy` startup
+task, allows private-network access to port 3000, and restarts the proxy after a
+failure. Run `uninstall-windows.cmd` as Administrator to remove the task and
+firewall rule; it leaves the project files in place.
+
 The default bind address is `0.0.0.0`, which allows devices on your local network
 to connect. Each browser signs in separately. The server does not save passwords
 or session cookies to disk. Upstream connections use HTTPS; the local listener
