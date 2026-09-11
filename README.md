@@ -35,6 +35,11 @@ task, allows private-network access to port 3000, and restarts the proxy after a
 failure. Run `uninstall-windows.cmd` as Administrator to remove the task and
 firewall rule; it leaves the project files in place.
 
+To update a Windows deployment, run `git pull` in this directory and then
+`service-windows.cmd restart` as Administrator. `service-windows.cmd` also
+accepts `start`, `stop`, and `status`, waits for the health check to confirm each
+change, and must be run as Administrator.
+
 The default bind address is `0.0.0.0`, which allows devices on your local network
 to connect. Each browser signs in separately. The server does not save passwords
 or session cookies to disk. Upstream connections use HTTPS; the local listener
