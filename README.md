@@ -68,6 +68,10 @@ quality, audio, subtitles, episode/season selection, autoplay-next, watched mark
 and resume. Account progress updates go to the original service. A per-account
 browser-local resume position also protects against delayed upstream readback.
 Native fullscreen, AirPlay, and picture-in-picture depend on device support.
+Resume waits for a native HLS seekable range and retains its target until the
+seek succeeds, including on iOS 12.0. A new local rewatch position is retained
+even for an episode already marked watched; explicitly marking an episode or
+season watched clears that local position.
 For AirPlay or casting, open the app using the computer's LAN address so the
 receiving device can reach its media URLs; `127.0.0.1` refers to the receiver itself.
 
@@ -299,8 +303,10 @@ proxy with a fresh browser profile. It checks ordinary pause/resume, simulated
 page suspension with a network outage and discarded media source, position and
 speed retention, and recovery after a media error. It also checks authenticated
 periodic/final progress saves, rejected beacons, failed-save retries, stale
-readback, and account resume after clearing local storage. It needs no account or live
-service. Actual iPad screen locking still requires a device check.
+readback, and account resume after clearing local storage. Regressions from the
+physical iOS 12 investigation cover rewatch resume, explicit completion, and HLS
+metadata arriving before the target becomes seekable. It needs no account or
+live service. Actual iPad screen locking still requires a device check.
 
 `scripts/verify-webkit.mjs` is a one-shot verification harness, separate from the
 app. It receives a test session through a loopback-only JSON request, keeps cookies
@@ -322,6 +328,11 @@ records only paths, sizes, and status codes; query strings, headers, cookies,
 and bodies are never stored, and signed media paths are collapsed. Use it to
 confirm that pages arrive compressed, that versioned player files remain cached,
 and that video segments pass through unmodified.
+
+For direct inspection and control of Safari **on a physical iOS 12 iPad**, see
+[IOS12-INSPECTION.md](IOS12-INSPECTION.md). It documents the verified USB bridge
+setup and `scripts/inspect-ipad.mjs`, which can query playback state, operate
+player controls, and observe progress requests in the device's actual browser.
 
 ## Files
 

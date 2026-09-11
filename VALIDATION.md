@@ -1,5 +1,57 @@
 # Verification record
 
+## Physical iOS 12 investigation
+
+Connected a physical iPad running **iOS 12.0.1 / Safari 12.0** over USB using
+`ios_webkit_debug_proxy` 1.9.2. The inspector queried and controlled the actual
+Safari tab through the configured local proxy. The repeatable setup and commands
+are in [IOS12-INSPECTION.md](IOS12-INSPECTION.md).
+
+Two restore failures were reproduced on the selected, already-watched episode:
+
+1. A position of **75 seconds** was saved locally and accepted by Kinopub with
+   HTTP 200 and `success: true`. A fresh page still published `marktime: 0` and
+   `completed: 1`. The player computed the local resume position, then discarded
+   it because the episode was marked watched.
+2. With the completed flag temporarily disabled **only in page memory**, native
+   HLS accepted `currentTime = 75` at `loadedmetadata` while `seekable` was empty.
+   The media element then reset to zero before `loadeddata`. The player had
+   already cleared its resume target, so it did not retry.
+
+The worktree player now retains active local rewatch progress, waits for a
+seekable target, and keeps the resume target until the seek succeeds. Explicit
+watched marks still clear local progress; late save acknowledgements and a pause
+at the cleared position cannot recreate that record.
+
+For the device check, the worktree JavaScript was injected into a freshly loaded
+title page before media loading, using the existing proxy session. The corrected
+player restored **75 seconds**, reached `readyState: 4` with a completed seek,
+and received another successful progress acknowledgement. The user then tapped
+Play and confirmed playback near 1:15. Inspector observations showed advancing
+time, decoded video at 1920px width, and periodic accepted saves at **89** and
+**104 seconds**, approximately 15 seconds apart.
+
+A final pause saved **398 seconds** with HTTP 200 and `success: true`. After a
+fresh page reload, Kinopub itself published `marktime: 398` and `completed: 0`.
+Reapplying the final worktree player restored **398 seconds**, with
+`readyState: 4`, `seeking: false`, and no media error. This confirms upstream
+readback as well as local fallback recovery. The test ended with playback paused.
+
+The existing 29 automated checks and syntax checks passed. Playwright/Chrome
+regressions use real generated HLS and cover completed-episode resume, explicit
+completion clearing, and a model of the observed early native seek failure.
+The added rewatch regression failed against the original player and passed with
+the fix. Restore assertions wait for a completed seek rather than merely an
+assigned `currentTime`.
+
+Device verification used a temporary player injection; it does not deploy the
+worktree to the normal proxy host. The running proxy needs the updated files and
+a restart for normal page reloads to use the fix. Physical screen-lock recovery
+was not part of this device check. The older pending-device entries below are
+historical.
+
+## Earlier verification
+
 Watch-position investigation on 2026-09-08 reproduced an authentication bug:
 filtering a leading local cookie left whitespace at the start of the forwarded
 Cookie header. A real local HTTP/2 upstream then received no Cookie header at

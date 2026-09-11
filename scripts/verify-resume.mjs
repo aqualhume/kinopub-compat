@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, webkit } from 'playwright';
 import { createServer } from '../server.mjs';
-import { verifyProgress } from './verify-progress.mjs';
+import { verifyProgress, verifyLegacyResume } from './verify-progress.mjs';
 
 const browserName = process.env.TEST_BROWSER || 'webkit';
 assert.ok(['webkit', 'chromium'].includes(browserName), 'TEST_BROWSER must be webkit or chromium');
@@ -41,9 +41,9 @@ try {
         body = await readFile(join(mediaDir, path.slice('/media/'.length)));
       } else if (path.startsWith('/item/view/')) {
         type = 'text/html';
-        const id = path.startsWith('/item/view/2') ? 2 : 1;
+        const id = Number(/^\/item\/view\/(\d+)/.exec(path)[1]);
         body = '<!doctype html><html><head><meta charset="utf-8"><meta name="csrf-token" content="fixture-token"><meta name="csrf-param" content="_csrf"><title>Playback recovery test</title></head><body><div class="nav-avatar"><a href="/users/fixture">Account</a></div><div class="player-shell"></div>' +
-          '<script>window.PLAYER_ITEM_ID=' + id + ';window.PLAYER_PLAYLIST=[{media_id:' + id + ',marktime:' + (id === 2 ? publishedPosition : 0) + ',title:"Recovery test",season:1,episode:1,duration:90,manifest:"/manifest/hls4/test"}];</script></body></html>';
+          '<script>window.PLAYER_ITEM_ID=' + id + ';window.PLAYER_PLAYLIST=[{media_id:' + id + ',marktime:' + (id === 2 ? publishedPosition : (id === 4 ? 60 : 0)) + ',completed:' + (id === 3 ? 1 : 0) + ',title:"Recovery test",season:1,episode:1,duration:90,manifest:"/manifest/hls4/test"}];</script></body></html>';
       } else if (path === '/item/media-marktime') {
         let input = ''; for await (const chunk of stream) input += chunk;
         const fields = new URLSearchParams(input);
@@ -171,6 +171,8 @@ try {
     rejectNextSave: () => { nextSaveResponse = 'html'; },
     publish: () => { publishedPosition = persistedPosition; } });
   console.log(JSON.stringify({ browser: browserName, accountProgress: 'pass' }));
+  await verifyLegacyResume({ context, origin, saves });
+  console.log(JSON.stringify({ browser: browserName, rewatchResume: 'pass', delayedSeekability: 'pass' }));
 } finally {
   if (browser) await browser.close();
   if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

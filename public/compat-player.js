@@ -75,7 +75,7 @@
     }
     function progressState(entry) {
       var key = String(entry.media_id);
-      if (!progressStates[key]) progressStates[key] = { serverTime: Number(entry.marktime) || 0, savedTime: null, latest: 0, lastAttempt: -Infinity, inFlight: false };
+      if (!progressStates[key]) progressStates[key] = { serverTime: Number(entry.marktime) || 0, savedTime: null, latest: 0, lastAttempt: -Infinity, inFlight: false, version: 0, clearedTime: null };
       return progressStates[key];
     }
     function rememberProgress(entry, state) {
@@ -87,12 +87,15 @@
       // An unchanged server value may predate the most recent local save. A
       // different value can come from another device and remains authoritative.
       if (saved && typeof saved === 'object' && typeof saved.time === 'number' && isFinite(saved.time) && saved.time >= 0 &&
-          (serverTime === saved.serverTime || serverTime === saved.savedTime)) return saved.time;
+          (serverTime === saved.serverTime || serverTime === saved.savedTime || serverTime === saved.time)) return saved.time;
+      // A watched episode can have a new, active rewatch position locally.
+      // Only fall back to the beginning when there is no such local record.
+      if (Number(entry.completed) === 1) return 0;
       // Migrate the older numeric fallback without overriding remote progress.
       return serverTime || (typeof saved === 'number' && isFinite(saved) && saved > 0 ? saved : 0);
     }
     function sendProgress(entry, state, beacon, force) {
-      var time = state.latest, now = Date.now();
+      var time = state.latest, now = Date.now(), version = state.version;
       if (time < 60) return; // Match the service player's minimum save position.
       if (!beacon && state.inFlight) { if (force) state.flushPending = true; return; }
       if (!force && (now - state.lastAttempt < 15000 || (state.savedTime !== null && time >= state.savedTime && time - state.savedTime < 10))) return;
@@ -100,7 +103,7 @@
       state.lastAttempt = now;
       if (!beacon) state.inFlight = true;
       post('/item/media-marktime', { media_id: entry.media_id, time: time }, beacon).then(function (acknowledged) {
-        if (acknowledged) { state.savedTime = time; state.warned = false; rememberProgress(entry, state); }
+        if (acknowledged && version === state.version) { state.savedTime = time; state.warned = false; rememberProgress(entry, state); }
       }).catch(function (error) {
         if (!state.warned) console.warn('Watch position could not be saved:', error.message);
         state.warned = true;
@@ -115,12 +118,22 @@
       if (switching || !mediaReady || resume || video.seeking || !current || !current.media_id) return;
       var state = progressState(current), time = Math.floor(playbackPosition());
       if (!isFinite(time) || time < 0) return;
+      if (time === state.clearedTime) return;
+      state.clearedTime = null;
       current.marktime = time;
       if (state.latest !== time) { state.latest = time; rememberProgress(current, state); }
       sendProgress(current, state, !!beacon, !!force || !!beacon);
     }
+    function clearProgress(entry) {
+      var state = progressState(entry);
+      // A late save acknowledgement or a pause at the same position must not
+      // undo an explicit watched mark. Moving again starts a new local rewatch.
+      state.version++; state.clearedTime = state.latest; state.flushPending = false;
+      state.serverTime = 0; state.savedTime = null; entry.marktime = 0;
+      setting(progressKey(entry), 0);
+    }
     function complete(entry, done) {
-      return post('/item/update-watching', { media_id: entry.media_id, c: done ? 1 : 0 }).then(function () { entry.completed = done ? 1 : 0; if (done) setting(progressKey(entry), 0); });
+      return post('/item/update-watching', { media_id: entry.media_id, c: done ? 1 : 0 }).then(function () { entry.completed = done ? 1 : 0; if (done) clearProgress(entry); });
     }
     function updateUI() {
       var total = isFinite(video.duration) && video.duration > 0 ? video.duration : (current ? current.duration : 0);
@@ -143,6 +156,21 @@
     }
     function playbackPosition() {
       return resume || (video.readyState ? video.currentTime : lastPosition) || 0;
+    }
+    function restorePosition() {
+      if (!resume || switching || !mediaReady || !video.readyState) return;
+      if (isFinite(video.duration) && video.duration > 0 && resume >= video.duration - 3) { resume = 0; return; }
+      if (video.seeking) return;
+      // iOS 12 can accept currentTime at loadedmetadata, then discard that seek
+      // when HLS data arrives. Wait for the target to be seekable and retain it
+      // until a completed seek (or playback at that position) confirms success.
+      if (Math.abs(video.currentTime - resume) < 1) { lastPosition = video.currentTime; resume = 0; return; }
+      for (var i = 0; i < video.seekable.length; i++) {
+        if (resume >= video.seekable.start(i) && resume <= video.seekable.end(i)) {
+          try { video.currentTime = resume; } catch (e) { /* Retry on the next media event. */ }
+          return;
+        }
+      }
     }
     function reloadMedia() {
       // Rebuild the native HLS resource (or MSE instance) in the Play gesture.
@@ -195,7 +223,6 @@
       video.pause(); if (hls) { hls.destroy(); hls = null; }
       mediaReady = false; qualities = []; qualitiesFor = ''; qualitiesLoading = false;
       current = entry; progressState(entry); resume = resumePosition(entry);
-      if (Number(entry.completed) === 1) resume = 0;
       needsReload = false; lastPosition = resume;
       video.removeAttribute('src'); video.load();
       errorBox.hidden = true; shell.classList.remove('kw-hide-controls'); shell.classList.remove('kw-started');
@@ -253,7 +280,7 @@
         all.textContent = seasonInfo.allWatched ? 'Сезон просмотрен ✓' : 'Я видел сезон';
         all.onclick = function () {
           all.disabled = true; var done = !seasonInfo.allWatched;
-          post('/item/update-watching', { season_id: seasonInfo.season_id, c: done ? 1 : 0 }).then(function () { seasonInfo.allWatched = done; playlist.forEach(function (p) { p.completed = done ? 1 : 0; }); episodePanel(); }).catch(function () { all.disabled = false; message('Не удалось сохранить отметку сезона.'); });
+          post('/item/update-watching', { season_id: seasonInfo.season_id, c: done ? 1 : 0 }).then(function () { seasonInfo.allWatched = done; playlist.forEach(function (p) { p.completed = done ? 1 : 0; if (done) clearProgress(p); }); episodePanel(); }).catch(function () { all.disabled = false; message('Не удалось сохранить отметку сезона.'); });
         }; panel.appendChild(all);
       }
       playlist.forEach(function (entry, position) {
@@ -326,13 +353,14 @@
     });
     seek.addEventListener('input', function () { if (video.readyState) video.currentTime = Number(seek.value); updateUI(); showControls(); });
     video.addEventListener('loadedmetadata', function () {
-      if (resume > 0 && resume < video.duration - 3) video.currentTime = resume;
-      resume = 0;
+      restorePosition();
       // Loading a new source resets playbackRate to defaultPlaybackRate.
       video.playbackRate = Number(getSetting('speed', '1'));
       restoreTracks(); updateUI();
     });
+    ['durationchange', 'loadeddata', 'canplay', 'progress'].forEach(function (name) { video.addEventListener(name, restorePosition); });
     video.addEventListener('timeupdate', function () {
+      restorePosition();
       if (!switching && video.readyState && !resume) {
         // Continued playback (including AirPlay) needs no rebuild on return.
         if (!document.hidden && !video.paused && video.currentTime > lastPosition) needsReload = false;
@@ -346,8 +374,8 @@
       updateUI(); showControls();
     });
     video.addEventListener('pause', function () { updateUI(); saveProgress(false, true); showControls(); });
-    video.addEventListener('seeked', function () { saveProgress(false, true); });
-    video.addEventListener('playing', function () { errorBox.hidden = true; shell.classList.add('kw-started'); });
+    video.addEventListener('seeked', function () { restorePosition(); saveProgress(false, true); });
+    video.addEventListener('playing', function () { restorePosition(); errorBox.hidden = true; shell.classList.add('kw-started'); });
     video.addEventListener('error', function () { if (!switching && video.error) { needsReload = true; message('Не удалось воспроизвести видео. Повторите попытку или выберите другой эпизод.'); } });
     video.addEventListener('ended', function () { complete(current, true).catch(function () {}); if (getSetting('autoplay', '1') === '1') next(1); });
     shell.addEventListener('mousemove', showControls);
